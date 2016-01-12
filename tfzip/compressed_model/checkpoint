@@ -1,0 +1,3 @@
+model_checkpoint_path: "compressed_model/compressed_model"
+all_model_checkpoint_paths: "uncompressed_model/uncompressed_model"
+all_model_checkpoint_paths: "compressed_model/compressed_model"

@@ -1,0 +1,2 @@
+model_checkpoint_path: "uncompressed_model/uncompressed_model"
+all_model_checkpoint_paths: "uncompressed_model/uncompressed_model"
