@@ -2,7 +2,7 @@
 An experimental compression pipeline for TensorFlow.
 
 # Goal
-This project aims to implement a TensorFlow version of the Deep Compression pipeline outlined by [Han et al.](http://arxiv.org/pdf/1510.00149v3.pdf).
+This project aims to implement a TensorFlow version of the Deep Compression pipeline outlined by [Han et al.](http://arxiv.org/pdf/1510.00149v3.pdf)
 
 # Current Progress
 ### This project is still in the experimental stage, it is not currently ready for production use
