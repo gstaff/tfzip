@@ -7,14 +7,21 @@ This project aims to implement a TensorFlow version of the Deep Compression pipe
 # Current Progress
 ### This project is still in the experimental stage, it is not currently ready for production use
 ### Pruning
-- Running `compression_test.py` can generate uncompressed_model and compressed_model protobuf files from a simple MNIST model for comparison.
-- Note that there is no difference in the protobuf file sizes until you apply gzip or some other compression tool.
-- The provided zip files applied pruning of roughly ~50% of the weights in the ~267k parameter LeNet-300-100.
-- Without compression both files are ~3.2 MB.
-- Compression applied to the trained model yields ~2.8 MB.
-- Compression applied to the pruned model yields ~2.3 MB, an appreciable improvement.
-- Next steps are to implement iterative pruning and retraining to preserve accuracy; [Learning both Weights and Connections for Efficient Neural Networks](http://arxiv.org/pdf/1506.02626v3.pdf) will be a useful reference.
-
+- Initial results:
+  - Running `compression_test.py` can generate uncompressed_model and compressed_model protobuf files from a simple MNIST model for comparison.
+  - Note that there is no difference in the protobuf file sizes until you apply `gzip` or some other compression tool.
+  - The provided protobuf files were generated using a LeNet-300-100 model trained for MNIST digit classification.
+  
+|              | Parameters | Parameter Compression | Protobuf Size | Protobuf Size (gzipped) | Protobuf Compression | Accuracy |
+|--------------|------------|-----------------------|---------------|-------------------------|----------------------|----------|
+| Uncompressed | ~267k      |                       | 3.2MB         | 2.8MB                   |                      | 98.00%   |
+| Compressed   | ~44k       | **~6x**               | 3.2MB         | 0.68MB                  | **~4x**              | 96.83%   |
+|              |            |                       |               |                         |                      |          |
+- Next steps:
+  - Improve accuracy preservation and increase compression ratio.
+    - [Learning both Weights and Connections for Efficient Neural Networks](http://arxiv.org/pdf/1506.02626v3.pdf) suggests ~12x compression without loss of accuracy can be obtained for this architecture.
+  - Refactor compression logic so that it can be more easily applied to other networks.
+  
 ### Trained Quantization
 - Not started.
 
