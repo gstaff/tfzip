@@ -8,6 +8,9 @@ from tensorflow.examples.tutorials.mnist import input_data
 mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
 TEST_KEEP_PROB = 1.0
 
+# Run training in a session
+sess = tf.Session()
+
 
 def weight_variable(shape):
     initial = tf.truncated_normal(shape, stddev=0.1)
@@ -21,14 +24,14 @@ def bias_variable(shape):
 # LeNet-300-100 for MNIST; expect ~1.6% error / 98.4% accuracy
 # LeNet 300-100 has 267K; should reduce to 22K
 # Base parameter count is 267K = (28 * 28 * 300 + 300 * 100 + 100 * 10) + (300 + 100 + 10)
-x = tf.placeholder("float", shape=[None, 784])
+# "Caffe was modified to add a mask which disregards pruned parameters during network operation for each weight tensor"
+x = tf.placeholder("float", shape=[None, 28 * 28])
 y_ = tf.placeholder("float", shape=[None, 10])
 
 # fc1
 W_fc1 = weight_variable([28 * 28, 300])
 prune_mask1 = tf.placeholder("float", shape=W_fc1.get_shape())
 fc1_pruned = tf.mul(W_fc1, prune_mask1)
-
 b_fc1 = bias_variable([300])
 h_fc1 = tf.nn.relu(tf.matmul(x, fc1_pruned) + b_fc1)
 # Dropout
@@ -55,19 +58,33 @@ y = tf.nn.softmax(logits)
 # Add epsilon to prevent 0 log 0; See http://quabr.com/33712178/tensorflow-nan-bug
 # http://stackoverflow.com/questions/34240703/difference-between-tensorflow-tf-nn-softmax-and-tf-nn-softmax-cross-entropy-with
 cross_entropy = tf.nn.softmax_cross_entropy_with_logits(logits, y_)
-loss = cross_entropy
-train_step = tf.train.AdamOptimizer(1e-4).minimize(loss)
+# "Overall, L2 regularization gives the best pruning results."
+l2_loss = tf.nn.l2_loss(tf.concat(0, [tf.reshape(W_fc1, [-1]), tf.reshape(W_fc2, [-1]), tf.reshape(W_fc3, [-1])]))
+l2_weight_decay = 0.0001  # 0.001 Suggested by Hinton et al. in 2012 ImageNet paper, but smaller works here
+loss = cross_entropy + l2_loss * l2_weight_decay
+# "After pruning, the network is retrained with 1/10 of the original network's original learning rate."
+train_step = tf.train.AdamOptimizer(1e-3).minimize(loss)
 correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
 accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
 
 # Define pruning ops
-threshold = 0.01  # Placeholder later; want to set this to a small value greater than zero, else indicator matrix revives pruned neurons!
-indicator_matrix1 = tf.to_float(tf.greater_equal(W_fc1, tf.constant(threshold, shape=W_fc1.get_shape())))
-indicator_matrix2 = tf.to_float(tf.greater_equal(W_fc2, tf.constant(threshold, shape=W_fc2.get_shape())))
-indicator_matrix3 = tf.to_float(tf.greater_equal(W_fc3, tf.constant(threshold, shape=W_fc3.get_shape())))
+# Placeholder later; want to set this to a small value greater than zero, else indicator matrix revives pruned neurons!
+# "The pruning threshold is chosen as a quality parameter multiplied by the standard deviation of a layer's weights."
+threshold = 0.0001
+t1 = tf.sqrt(tf.nn.l2_loss(W_fc1)) * threshold
+t2 = tf.sqrt(tf.nn.l2_loss(W_fc2)) * threshold
+t3 = tf.sqrt(tf.nn.l2_loss(W_fc3)) * threshold
+# Apply the previous prune masks each time
+sess.run(tf.initialize_all_variables())
+prev_mask1 = sess.run(tf.ones_like(W_fc1))
+prev_mask2 = sess.run(tf.ones_like(W_fc2))
+prev_mask3 = sess.run(tf.ones_like(W_fc3))
+indicator_matrix1 = tf.mul(tf.to_float(tf.greater_equal(W_fc1, tf.ones_like(W_fc1) * t1)), prev_mask1)
+indicator_matrix2 = tf.mul(tf.to_float(tf.greater_equal(W_fc2, tf.ones_like(W_fc2) * t2)), prev_mask2)
+indicator_matrix3 = tf.mul(tf.to_float(tf.greater_equal(W_fc3, tf.ones_like(W_fc3) * t3)), prev_mask3)
 
-# Enforce data dependency here?
+# Applying the pruning mask to the actual weights that are saved
 prune_fc1 = W_fc1.assign(fc1_pruned)
 prune_fc2 = W_fc2.assign(fc2_pruned)
 prune_fc3 = W_fc3.assign(fc3_pruned)
@@ -83,19 +100,25 @@ count_parameters3 = tf.reduce_sum(nonzero_indicator3)
 
 # Create a saver for writing training checkpoints.
 saver = tf.train.Saver()
-# Run training in a session
-sess = tf.Session()
 
 
 def print_mask_parameter_counts():
     print("# Mask Parameter Counts")
-    print("Mask1: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix1, tf.zeros_like(indicator_matrix1)))))))
-    print("Mask2: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix2, tf.zeros_like(indicator_matrix2)))))))
-    print("Mask3: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix3, tf.zeros_like(indicator_matrix3)))))))
+    print("  - Mask1: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix1, tf.zeros_like(indicator_matrix1)))))))
+    print("  - Mask2: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix2, tf.zeros_like(indicator_matrix2)))))))
+    print("  - Mask3: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix3, tf.zeros_like(indicator_matrix3)))))))
 
 
-def train(iterations=50000, kp1=0.5, kp2=0.5, compression=False):
+# "So when we retrain the pruned layers, we should keep the surviving parameters instead of re-initializing them."
+# "To prevent this, we fix the parameters for CONV layers and only retrain the FC layers after pruning the FC layers, and vice versa."
+def train(iterations=100000, kp1=0.5, kp2=0.5, compression=False):
     if compression:
+        global prev_mask1
+        global prev_mask2
+        global prev_mask3
+        prev_mask1 = sess.run(indicator_matrix1)
+        prev_mask2 = sess.run(indicator_matrix2)
+        prev_mask3 = sess.run(indicator_matrix3)
         m1 = sess.run(indicator_matrix1)
         m2 = sess.run(indicator_matrix2)
         m3 = sess.run(indicator_matrix3)
@@ -115,11 +138,12 @@ def train(iterations=50000, kp1=0.5, kp2=0.5, compression=False):
 
 def print_parameter_counts():
     print("# W Parameter Counts")
-    print("Parameters1: {0}".format(sess.run(count_parameters1)))
-    print("Parameters2: {0}".format(sess.run(count_parameters2)))
-    print("Parameters3: {0}".format(sess.run(count_parameters3)))
+    print("  - Parameters1: {0}".format(sess.run(count_parameters1)))
+    print("  - Parameters2: {0}".format(sess.run(count_parameters2)))
+    print("  - Parameters3: {0}".format(sess.run(count_parameters3)))
 
 
+# "During retraining, however, the dropout ratio must be adjusted to account for the change in model capacity."
 def calculate_new_keep_prob(original_keep_prob, original_connections, retraining_connections):
     return 1.0 - ((1.0 - original_keep_prob) * math.sqrt(retraining_connections / original_connections))
 
@@ -127,7 +151,7 @@ def calculate_new_keep_prob(original_keep_prob, original_connections, retraining
 def compress(times=1):
     kp1 = kp2 = 0.5
     for i in range(times):
-        print("# Compressing {0}".format(i))
+        print("# Compressing iteration {0}...".format(i + 1))
         c1 = sess.run(count_parameters1)
         c2 = sess.run(count_parameters2)
         print_mask_parameter_counts()
@@ -144,7 +168,7 @@ def compress(times=1):
         # Retrain with pruned connections
         print("# Before retraining")
         print_parameter_counts()
-        train(50000, kp1, kp2, compression=True)
+        train(100000, kp1, kp2, compression=True)
         print("# After retraining")
         print_parameter_counts()
     saver.save(sess, "compressed_model/compressed_model")
@@ -160,14 +184,14 @@ if __name__ == '__main__':
     sess.run(tf.initialize_all_variables())
     train()
     saver.save(sess, "uncompressed_model/uncompressed_model")
-    compress(5)
+    compress(5)  # "We used five iterations of pruning an retraining."
     # After 5 iterations of pruning and retraining
     # Test Accuracy:
-    #   98% => 96.83%
+    #   98.19% => 97.23%
     # Parameters:
-    #   fc1: 235,200 => 38,801
-    #   fc2: 30,000 => 5,728
-    #   fc3: 1,000 => 433
-    #   total: ~267k => ~44k (~6x compression)
+    #   fc1: 235,200 => 22,848
+    #   fc2: 30,000 => 4,071
+    #   fc3: 1,000 => 412
+    #   total: ~267k => ~27k (~10x compression)
     # Protobuf Size (after gzip):
-    #   2.8 MB => 683kB (~4x compression)
+    #   ~2.8 MB => ~490kB (~6x compression)
