@@ -8,9 +8,6 @@ from tensorflow.examples.tutorials.mnist import input_data
 mnist = input_data.read_data_sets('MNIST_data', one_hot=True)
 TEST_KEEP_PROB = 1.0
 
-# Run training in a session
-sess = tf.Session()
-
 
 def weight_variable(shape):
     initial = tf.truncated_normal(shape, stddev=0.1)
@@ -21,16 +18,19 @@ def bias_variable(shape):
     initial = tf.constant(0.1, shape=shape)
     return tf.Variable(initial)
 
+
 # LeNet-300-100 for MNIST; expect ~1.6% error / 98.4% accuracy
 # LeNet 300-100 has 267K; should reduce to 22K
 # Base parameter count is 267K = (28 * 28 * 300 + 300 * 100 + 100 * 10) + (300 + 100 + 10)
 # "Caffe was modified to add a mask which disregards pruned parameters during network operation for each weight tensor"
+tf.GraphKeys.PRUNING_MASKS = "pruning_masks"  # Add this to prevent pruning variables from being stored with the model
+
 x = tf.placeholder("float", shape=[None, 28 * 28])
 y_ = tf.placeholder("float", shape=[None, 10])
 
 # fc1
 W_fc1 = weight_variable([28 * 28, 300])
-prune_mask1 = tf.placeholder("float", shape=W_fc1.get_shape())
+prune_mask1 = tf.Variable(tf.ones_like(W_fc1), trainable=False, collections=[tf.GraphKeys.PRUNING_MASKS])
 fc1_pruned = tf.mul(W_fc1, prune_mask1)
 b_fc1 = bias_variable([300])
 h_fc1 = tf.nn.relu(tf.matmul(x, fc1_pruned) + b_fc1)
@@ -39,7 +39,7 @@ keep_prob1 = tf.placeholder("float")
 h_fc1_drop = tf.nn.dropout(h_fc1, keep_prob1)
 # fc2
 W_fc2 = weight_variable([300, 100])
-prune_mask2 = tf.placeholder("float", shape=W_fc2.get_shape())
+prune_mask2 = tf.Variable(tf.ones_like(W_fc2), trainable=False, collections=[tf.GraphKeys.PRUNING_MASKS])
 fc2_pruned = tf.mul(W_fc2, prune_mask2)
 b_fc2 = bias_variable([100])
 h_fc2 = tf.nn.relu(tf.matmul(h_fc1_drop, fc2_pruned) + b_fc2)
@@ -48,7 +48,7 @@ keep_prob2 = tf.placeholder("float")
 h_fc2_drop = tf.nn.dropout(h_fc2, keep_prob2)
 # fc3
 W_fc3 = weight_variable([100, 10])
-prune_mask3 = tf.placeholder("float", shape=W_fc3.get_shape())
+prune_mask3 = tf.Variable(tf.ones_like(W_fc3), trainable=False, collections=[tf.GraphKeys.PRUNING_MASKS])
 fc3_pruned = tf.mul(W_fc3, prune_mask3)
 b_fc3 = bias_variable([10])
 logits = tf.matmul(h_fc2_drop, fc3_pruned) + b_fc3
@@ -67,7 +67,6 @@ train_step = tf.train.AdamOptimizer(1e-3).minimize(loss)
 correct_prediction = tf.equal(tf.argmax(y, 1), tf.argmax(y_, 1))
 accuracy = tf.reduce_mean(tf.cast(correct_prediction, "float"))
 
-
 # Define pruning ops
 # Placeholder later; want to set this to a small value greater than zero, else indicator matrix revives pruned neurons!
 # "The pruning threshold is chosen as a quality parameter multiplied by the standard deviation of a layer's weights."
@@ -76,13 +75,15 @@ t1 = tf.sqrt(tf.nn.l2_loss(W_fc1)) * threshold
 t2 = tf.sqrt(tf.nn.l2_loss(W_fc2)) * threshold
 t3 = tf.sqrt(tf.nn.l2_loss(W_fc3)) * threshold
 # Apply the previous prune masks each time
-sess.run(tf.initialize_all_variables())
-prev_mask1 = sess.run(tf.ones_like(W_fc1))
-prev_mask2 = sess.run(tf.ones_like(W_fc2))
-prev_mask3 = sess.run(tf.ones_like(W_fc3))
-indicator_matrix1 = tf.mul(tf.to_float(tf.greater_equal(W_fc1, tf.ones_like(W_fc1) * t1)), prev_mask1)
-indicator_matrix2 = tf.mul(tf.to_float(tf.greater_equal(W_fc2, tf.ones_like(W_fc2) * t2)), prev_mask2)
-indicator_matrix3 = tf.mul(tf.to_float(tf.greater_equal(W_fc3, tf.ones_like(W_fc3) * t3)), prev_mask3)
+indicator_matrix1 = tf.mul(tf.to_float(tf.greater_equal(W_fc1, tf.ones_like(W_fc1) * t1)), prune_mask1)
+indicator_matrix2 = tf.mul(tf.to_float(tf.greater_equal(W_fc2, tf.ones_like(W_fc2) * t2)), prune_mask2)
+indicator_matrix3 = tf.mul(tf.to_float(tf.greater_equal(W_fc3, tf.ones_like(W_fc3) * t3)), prune_mask3)
+
+# Update the prune masks
+update_mask1 = tf.assign(prune_mask1, indicator_matrix1)
+update_mask2 = tf.assign(prune_mask2, indicator_matrix2)
+update_mask3 = tf.assign(prune_mask3, indicator_matrix3)
+update_all_masks = tf.group(update_mask1, update_mask2, update_mask3)
 
 # Applying the pruning mask to the actual weights that are saved
 prune_fc1 = W_fc1.assign(fc1_pruned)
@@ -101,39 +102,39 @@ count_parameters3 = tf.reduce_sum(nonzero_indicator3)
 # Create a saver for writing training checkpoints.
 saver = tf.train.Saver()
 
+# Run training in a session
+sess = tf.Session()
+sess.run(tf.initialize_all_variables())
+sess.run(tf.initialize_variables(tf.get_collection(tf.GraphKeys.PRUNING_MASKS)))
+
 
 def print_mask_parameter_counts():
     print("# Mask Parameter Counts")
-    print("  - Mask1: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix1, tf.zeros_like(indicator_matrix1)))))))
-    print("  - Mask2: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix2, tf.zeros_like(indicator_matrix2)))))))
-    print("  - Mask3: {0}".format(sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix3, tf.zeros_like(indicator_matrix3)))))))
+    print("  - Mask1: {0}".format(
+        sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix1, tf.zeros_like(indicator_matrix1)))))))
+    print("  - Mask2: {0}".format(
+        sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix2, tf.zeros_like(indicator_matrix2)))))))
+    print("  - Mask3: {0}".format(
+        sess.run(tf.reduce_sum(tf.to_float(tf.not_equal(indicator_matrix3, tf.zeros_like(indicator_matrix3)))))))
+
+
+def print_accuracy():
+    feed_dict = {x: mnist.test.images, y_: mnist.test.labels, keep_prob1: TEST_KEEP_PROB, keep_prob2: TEST_KEEP_PROB}
+    print("test accuracy %g" % sess.run(accuracy, feed_dict=feed_dict))
 
 
 # "So when we retrain the pruned layers, we should keep the surviving parameters instead of re-initializing them."
-# "To prevent this, we fix the parameters for CONV layers and only retrain the FC layers after pruning the FC layers, and vice versa."
-def train(iterations=100000, kp1=0.5, kp2=0.5, compression=False):
-    if compression:
-        global prev_mask1
-        global prev_mask2
-        global prev_mask3
-        prev_mask1 = sess.run(indicator_matrix1)
-        prev_mask2 = sess.run(indicator_matrix2)
-        prev_mask3 = sess.run(indicator_matrix3)
-        m1 = sess.run(indicator_matrix1)
-        m2 = sess.run(indicator_matrix2)
-        m3 = sess.run(indicator_matrix3)
-    else:
-        m1 = sess.run(tf.ones_like(W_fc1))
-        m2 = sess.run(tf.ones_like(W_fc2))
-        m3 = sess.run(tf.ones_like(W_fc3))
-    print_mask_parameter_counts()
+# "To prevent this, we fix the parameters for CONV layers and only retrain the FC layers after pruning the FC layers,
+#  and vice versa."
+def train(iterations=100000, kp1=0.5, kp2=0.5):
     for i in range(iterations):
         batch_xs, batch_ys = mnist.train.next_batch(50)
         if i % 100 == 0:
-            train_accuracy = sess.run(accuracy, feed_dict={x: batch_xs, y_: batch_ys, keep_prob1: TEST_KEEP_PROB, keep_prob2: TEST_KEEP_PROB, prune_mask1: m1, prune_mask2: m2, prune_mask3: m3})
+            feed_dict = {x: batch_xs, y_: batch_ys, keep_prob1: TEST_KEEP_PROB, keep_prob2: TEST_KEEP_PROB}
+            train_accuracy = sess.run(accuracy, feed_dict=feed_dict)
             print("step %d training accuracy %g" % (i, train_accuracy))
-        sess.run(train_step, feed_dict={x: batch_xs, y_: batch_ys, keep_prob1: kp1, keep_prob2: kp2, prune_mask1: m1, prune_mask2: m2, prune_mask3: m3})
-    print("test accuracy %g" % sess.run(accuracy, feed_dict={x: mnist.test.images, y_: mnist.test.labels, keep_prob1: TEST_KEEP_PROB, keep_prob2: TEST_KEEP_PROB, prune_mask1: m1, prune_mask2: m2, prune_mask3: m3}))
+        sess.run(train_step, feed_dict={x: batch_xs, y_: batch_ys, keep_prob1: kp1, keep_prob2: kp2})
+    print_accuracy()
 
 
 def print_parameter_counts():
@@ -155,12 +156,11 @@ def compress(times=1):
         c1 = sess.run(count_parameters1)
         c2 = sess.run(count_parameters2)
         print_mask_parameter_counts()
-        m1 = sess.run(indicator_matrix1)
-        m2 = sess.run(indicator_matrix2)
-        m3 = sess.run(indicator_matrix3)
         print("# Before pruning")
         print_parameter_counts()
-        sess.run(prune_all, feed_dict={prune_mask1: m1, prune_mask2: m2, prune_mask3: m3})
+        sess.run(update_all_masks)
+        print_mask_parameter_counts()
+        sess.run(prune_all)
         c1_retrain = sess.run(count_parameters1)
         c2_retrain = sess.run(count_parameters2)
         kp1 = calculate_new_keep_prob(kp1, c1, c1_retrain)
@@ -168,16 +168,13 @@ def compress(times=1):
         # Retrain with pruned connections
         print("# Before retraining")
         print_parameter_counts()
-        train(100000, kp1, kp2, compression=True)
+        train(100000, kp1, kp2)
         print("# After retraining")
         print_parameter_counts()
     saver.save(sess, "compressed_model/compressed_model")
     print("# Saved compressed model")
     print_parameter_counts()
-    m1 = sess.run(tf.ones_like(W_fc1))
-    m2 = sess.run(tf.ones_like(W_fc2))
-    m3 = sess.run(tf.ones_like(W_fc3))
-    print("test accuracy %g" % sess.run(accuracy, feed_dict={x: mnist.test.images, y_: mnist.test.labels, keep_prob1: TEST_KEEP_PROB, keep_prob2: TEST_KEEP_PROB, prune_mask1: m1, prune_mask2: m2, prune_mask3: m3}))
+    print_accuracy()
 
 
 if __name__ == '__main__':
